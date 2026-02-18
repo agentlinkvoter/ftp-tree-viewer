@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "ftp-tree-viewer"
+version = "1.0.0"
+description = "Visualize an FTP server as a directory tree, like the `tree` command"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = ["colorama>=0.4.6"]
+
+[project.scripts]
+ftp-tree = "ftp_tree_viewer:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ftp_tree*"]
