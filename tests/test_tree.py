@@ -2,7 +2,7 @@
 
 import io
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from ftp_tree.permissions import FileEntry, ServerOS
 from ftp_tree.tree import FTPTreeViewer, _fmt_size, _build_label
@@ -38,7 +38,6 @@ def _make_viewer(entries_by_path, **kwargs):
     client = MagicMock()
     client.server_os = ServerOS.UNIX
     client.list_dir.side_effect = lambda path: entries_by_path.get(path, [])
-
     out = io.StringIO()
     viewer = FTPTreeViewer(client=client, no_color=True, out=out, **kwargs)
     return viewer, out
@@ -65,7 +64,7 @@ class TestBuildLabel(unittest.TestCase):
     def _label(self, entry, **kwargs):
         defaults = dict(
             show_perms=False, show_size=False, show_modified=False,
-            highlight_writable=False, no_color=True
+            is_target=False, no_color=True,
         )
         defaults.update(kwargs)
         return _build_label(entry, **defaults)
@@ -102,22 +101,21 @@ class TestBuildLabel(unittest.TestCase):
         label = self._label(_entry("file.txt", modified="Jan  1 12:00"), show_modified=True)
         self.assertIn("Jan  1 12:00", label)
 
-    def test_writable_badge_shown_when_flag_on(self):
-        label = self._label(
-            _entry("uploads", is_dir=True, writable=True),
-            highlight_writable=True,
-        )
-        self.assertIn("[WRITABLE]", label)
+    def test_writable_dir_target_shows_badge(self):
+        label = self._label(_entry("uploads", is_dir=True, writable=True), is_target=True)
+        self.assertIn("[WRITABLE DIR]", label)
 
-    def test_writable_badge_hidden_when_flag_off(self):
-        label = self._label(
-            _entry("uploads", is_dir=True, writable=True),
-            highlight_writable=False,
-        )
-        self.assertNotIn("[WRITABLE]", label)
+    def test_writable_file_target_shows_badge(self):
+        label = self._label(_entry("config.php", writable=True), is_target=True)
+        self.assertIn("[WRITABLE FILE]", label)
+
+    def test_non_target_writable_dir_no_badge(self):
+        # Without is_target, no badge even if entry.writable is True
+        label = self._label(_entry("uploads", is_dir=True, writable=True), is_target=False)
+        self.assertNotIn("[WRITABLE", label)
 
 
-class TestFTPTreeViewer(unittest.TestCase):
+class TestFTPTreeViewerNormalMode(unittest.TestCase):
     def test_renders_root_path(self):
         viewer, out = _make_viewer({"/": []})
         viewer.render("/")
@@ -173,31 +171,14 @@ class TestFTPTreeViewer(unittest.TestCase):
         }
         viewer, out = _make_viewer(entries, max_depth=1)
         viewer.render("/")
-        output = out.getvalue()
-        self.assertIn("a/", output)
-        # depth 0 = root children, depth 1 = /a children, depth 2 = /a/b children
-        # With max_depth=1 we should NOT descend into /a/b
-        self.assertNotIn("deep.txt", output)
+        # depth 1 = /a children, depth 2 = /a/b children — should be cut
+        self.assertNotIn("deep.txt", out.getvalue())
 
     def test_symlinks_not_recursed(self):
-        entries = {
-            "/": [_entry("link", is_symlink=True, link_target="/other")],
-        }
+        entries = {"/": [_entry("link", is_symlink=True, link_target="/other")]}
         viewer, out = _make_viewer(entries)
         viewer.render("/")
-        # Should not try to list /link
         viewer.client.list_dir.assert_called_once_with("/")
-
-    def test_output_written_to_file_out(self):
-        entries = {"/": [_entry("file.txt")]}
-        client = MagicMock()
-        client.server_os = ServerOS.UNIX
-        client.list_dir.side_effect = lambda path: entries.get(path, [])
-        out = io.StringIO()
-        file_out = io.StringIO()
-        viewer = FTPTreeViewer(client=client, no_color=True, out=out, file_out=file_out)
-        viewer.render("/")
-        self.assertIn("file.txt", file_out.getvalue())
 
     def test_dirs_sorted_before_files(self):
         entries = {
@@ -210,19 +191,26 @@ class TestFTPTreeViewer(unittest.TestCase):
         viewer, out = _make_viewer(entries)
         viewer.render("/")
         output = out.getvalue()
-        alpha_pos = output.index("alpha")
-        zebra_pos = output.index("zebra.txt")
-        self.assertLess(alpha_pos, zebra_pos)
+        self.assertLess(output.index("alpha"), output.index("zebra.txt"))
 
     def test_tree_connectors_present(self):
-        entries = {
-            "/": [_entry("a.txt"), _entry("b.txt")],
-        }
+        entries = {"/": [_entry("a.txt"), _entry("b.txt")]}
         viewer, out = _make_viewer(entries)
         viewer.render("/")
         output = out.getvalue()
         self.assertIn("├──", output)
         self.assertIn("└──", output)
+
+    def test_output_written_to_file_out(self):
+        entries = {"/": [_entry("file.txt")]}
+        client = MagicMock()
+        client.server_os = ServerOS.UNIX
+        client.list_dir.side_effect = lambda path: entries.get(path, [])
+        out = io.StringIO()
+        file_out = io.StringIO()
+        viewer = FTPTreeViewer(client=client, no_color=True, out=out, file_out=file_out)
+        viewer.render("/")
+        self.assertIn("file.txt", file_out.getvalue())
 
     def test_permission_denied_dir_shows_error(self):
         from ftp_tree.client import FTPClientError
@@ -231,9 +219,160 @@ class TestFTPTreeViewer(unittest.TestCase):
         client.list_dir.side_effect = FTPClientError("Permission denied")
         out = io.StringIO()
         viewer = FTPTreeViewer(client=client, no_color=True, out=out)
-        # Should not raise; should print an error line
         viewer.render("/")
         self.assertIn("error", out.getvalue().lower())
+
+
+class TestWritableDirsMode(unittest.TestCase):
+    """--writable-dirs: filtered tree, only paths to writable directories."""
+
+    def _entries(self):
+        return {
+            "/": [
+                _entry("pub", is_dir=True),
+                _entry("incoming", is_dir=True, writable=True),
+                _entry("readme.txt"),
+            ],
+            "/pub": [
+                _entry("uploads", is_dir=True, writable=True),
+                _entry("docs", is_dir=True),
+                _entry("index.html"),
+            ],
+            "/pub/uploads": [],
+            "/pub/docs": [],
+        }
+
+    def test_writable_dir_appears(self):
+        viewer, out = _make_viewer(self._entries(), writable_dirs=True)
+        viewer.render("/")
+        output = out.getvalue()
+        self.assertIn("incoming", output)
+        self.assertIn("uploads", output)
+
+    def test_writable_dir_has_badge(self):
+        viewer, out = _make_viewer(self._entries(), writable_dirs=True)
+        viewer.render("/")
+        self.assertIn("[WRITABLE DIR]", out.getvalue())
+
+    def test_non_writable_dirs_pruned(self):
+        viewer, out = _make_viewer(self._entries(), writable_dirs=True)
+        viewer.render("/")
+        output = out.getvalue()
+        self.assertNotIn("docs/", output)
+
+    def test_files_pruned(self):
+        viewer, out = _make_viewer(self._entries(), writable_dirs=True)
+        viewer.render("/")
+        output = out.getvalue()
+        self.assertNotIn("readme.txt", output)
+        self.assertNotIn("index.html", output)
+
+    def test_ancestor_path_shown(self):
+        # pub/ is not writable itself but is an ancestor of writable uploads/
+        viewer, out = _make_viewer(self._entries(), writable_dirs=True)
+        viewer.render("/")
+        self.assertIn("pub/", out.getvalue())
+
+    def test_summary_shows_writable_count(self):
+        viewer, out = _make_viewer(self._entries(), writable_dirs=True)
+        viewer.render("/")
+        output = out.getvalue()
+        self.assertIn("writable", output)
+        self.assertIn("director", output)
+
+    def test_no_findings_message(self):
+        entries = {"/": [_entry("pub", is_dir=True)], "/pub": []}
+        viewer, out = _make_viewer(entries, writable_dirs=True)
+        viewer.render("/")
+        self.assertIn("no writable targets found", out.getvalue())
+
+
+class TestWritableFilesMode(unittest.TestCase):
+    """--writable-files: filtered tree, only paths to writable files."""
+
+    def _entries(self):
+        return {
+            "/": [
+                _entry("pub", is_dir=True),
+                _entry("config.php", writable=True),
+                _entry("readme.txt"),
+            ],
+            "/pub": [
+                _entry("shell.php", writable=True),
+                _entry("index.html"),
+                _entry("safe_dir", is_dir=True, writable=True),
+            ],
+            "/pub/safe_dir": [],
+        }
+
+    def test_writable_file_appears(self):
+        viewer, out = _make_viewer(self._entries(), writable_files=True)
+        viewer.render("/")
+        output = out.getvalue()
+        self.assertIn("config.php", output)
+        self.assertIn("shell.php", output)
+
+    def test_writable_file_has_badge(self):
+        viewer, out = _make_viewer(self._entries(), writable_files=True)
+        viewer.render("/")
+        self.assertIn("[WRITABLE FILE]", out.getvalue())
+
+    def test_writable_dirs_not_flagged_as_files(self):
+        # safe_dir is writable but is a dir — should not appear with --writable-files
+        viewer, out = _make_viewer(self._entries(), writable_files=True)
+        viewer.render("/")
+        output = out.getvalue()
+        self.assertNotIn("[WRITABLE DIR]", output)
+        self.assertNotIn("safe_dir", output)
+
+    def test_non_writable_files_pruned(self):
+        viewer, out = _make_viewer(self._entries(), writable_files=True)
+        viewer.render("/")
+        output = out.getvalue()
+        self.assertNotIn("readme.txt", output)
+        self.assertNotIn("index.html", output)
+
+    def test_summary_shows_writable_file_count(self):
+        viewer, out = _make_viewer(self._entries(), writable_files=True)
+        viewer.render("/")
+        output = out.getvalue()
+        self.assertIn("writable", output)
+        self.assertIn("file", output)
+
+
+class TestWritableAllMode(unittest.TestCase):
+    """writable_dirs=True + writable_files=True: both dirs and files found."""
+
+    def _entries(self):
+        return {
+            "/": [
+                _entry("uploads", is_dir=True, writable=True),
+                _entry("config.php", writable=True),
+                _entry("readme.txt"),
+            ],
+            "/uploads": [],
+        }
+
+    def test_both_writable_dir_and_file_appear(self):
+        viewer, out = _make_viewer(self._entries(), writable_dirs=True, writable_files=True)
+        viewer.render("/")
+        output = out.getvalue()
+        self.assertIn("uploads", output)
+        self.assertIn("config.php", output)
+        self.assertIn("[WRITABLE DIR]", output)
+        self.assertIn("[WRITABLE FILE]", output)
+
+    def test_non_writable_file_pruned(self):
+        viewer, out = _make_viewer(self._entries(), writable_dirs=True, writable_files=True)
+        viewer.render("/")
+        self.assertNotIn("readme.txt", out.getvalue())
+
+    def test_summary_shows_both_counts(self):
+        viewer, out = _make_viewer(self._entries(), writable_dirs=True, writable_files=True)
+        viewer.render("/")
+        output = out.getvalue()
+        self.assertIn("writable director", output)
+        self.assertIn("writable file", output)
 
 
 if __name__ == "__main__":

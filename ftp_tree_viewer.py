@@ -16,8 +16,17 @@ Usage examples
   # FTPS (TLS), start at /var/www, save clean copy to file
   ftp-tree 192.168.1.1 --tls -p 990 --path /var/www -o report.txt
 
+  # Find writable directories only (filtered path view)
+  ftp-tree 192.168.1.1 -u ftpuser --writable-dirs
+
+  # Find writable files only
+  ftp-tree 192.168.1.1 -u ftpuser --writable-files
+
+  # Find both writable dirs and files
+  ftp-tree 192.168.1.1 -u ftpuser --writable-all
+
   # Full info dump
-  ftp-tree 192.168.1.1 -u admin -l -s -m -a --writable --banner
+  ftp-tree 192.168.1.1 -u admin -l -s -m -a --writable-all --banner
 """
 
 import argparse
@@ -66,8 +75,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Show file sizes in human-readable format")
     p.add_argument("-m", "--modified", action="store_true",
                    help="Show last-modified timestamps")
-    p.add_argument("--writable", action="store_true",
-                   help="Highlight world/group-writable directories — useful for recon")
+    writable = p.add_mutually_exclusive_group()
+    writable.add_argument("--writable-dirs", action="store_true",
+                          help="Show only paths leading to world/group-writable directories, "
+                               "highlighted in red")
+    writable.add_argument("--writable-files", action="store_true",
+                          help="Show only paths leading to world/group-writable files, "
+                               "highlighted in red")
+    writable.add_argument("--writable-all", action="store_true",
+                          help="Show only paths leading to writable directories AND files")
     p.add_argument("--no-color", action="store_true",
                    help="Disable colored output")
     p.add_argument("--banner", action="store_true",
@@ -136,7 +152,8 @@ def main() -> None:
             show_modified=args.modified,
             max_depth=args.depth,
             no_color=args.no_color,
-            highlight_writable=args.writable,
+            writable_dirs=args.writable_dirs or args.writable_all,
+            writable_files=args.writable_files or args.writable_all,
             file_out=file_out,
         )
         viewer.render(args.path)
