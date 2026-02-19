@@ -10,9 +10,6 @@ Usage examples
   # Authenticated, show permissions + sizes + hidden files
   ftp-tree 192.168.1.1 -u admin -l -s -a
 
-  # Highlight world/group-writable directories (useful for recon)
-  ftp-tree 192.168.1.1 -u ftpuser --writable
-
   # FTPS (TLS), start at /var/www, save clean copy to file
   ftp-tree 192.168.1.1 --tls -p 990 --path /var/www -o report.txt
 

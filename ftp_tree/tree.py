@@ -24,8 +24,15 @@ _SPAC = "    "
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
 
 try:
-    from colorama import Fore, Style, init as _colorama_init
-    _colorama_init()
+    from colorama import Fore, Style
+    try:
+        # colorama 0.4.6+: enables native ANSI in the Windows console without
+        # wrapping stdout — more reliable than init() on modern Windows.
+        from colorama import just_fix_windows_console
+        just_fix_windows_console()
+    except ImportError:
+        from colorama import init as _colorama_init
+        _colorama_init()
     _HAS_COLOR = True
 except ImportError:
     _HAS_COLOR = False
